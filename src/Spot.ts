@@ -1,10 +1,8 @@
 /* eslint-disable @typescript-eslint/no-empty-function */
 /* eslint-disable @typescript-eslint/no-inferrable-types */
 import Konva from 'konva'
-import { Option, None, Some, none, some,isNone,isSome,getOrElse } from "fp-ts/Option"
-import * as O from "fp-ts/Option"
-import { pipe } from 'fp-ts/function'
-import {range, concat, cloneDeep} from "lodash"
+import { Option, None, Some, none, some, isNone, isSome, getOrElse } from "fp-ts/Option"
+import { range, concat, cloneDeep } from "lodash"
 import { DateTime, Duration } from "luxon"
 
 export interface SpotConfig {
@@ -47,6 +45,8 @@ export interface CalcState {
   lastIntegralRelativeTime: number
   /// in meter and we use this to find current speed by looking up the speed map
   lastIntegralDistance: number
+  /// the distance that this track ends
+  maxDistance: number
 }
 
 const getNearestSpeed = (speeds: SpeedMap, distance: number): number => {
@@ -60,28 +60,33 @@ const getNearestSpeed = (speeds: SpeedMap, distance: number): number => {
   return speeds[nearest]
 }
 
-const nextState = (lastState: CalcState, now: DateTime, speeds: SpeedMap): Option<CalcState> => {
+const nextState = (lastState: CalcState, now: DateTime, speeds: SpeedMap, spot: SpotConfig): Option<CalcState> => {
   const deltaT = now.diff(lastState.lastIntegralTime).as("seconds")
   if (deltaT < 0) {
     return none
   }
   const speed = getNearestSpeed(speeds, lastState.lastIntegralDistance)
   const deltaL = speed * deltaT
+  const d = lastState.lastIntegralDistance + deltaL
+  if (d > (lastState.maxDistance + spot.lineLength)) {
+    return none
+  }
   const newState: CalcState = {
     startTime: lastState.startTime,
     lastIntegralTime: now,
     lastIntegralRelativeTime: lastState.lastIntegralRelativeTime + deltaT,
-    lastIntegralDistance: lastState.lastIntegralDistance + deltaL,
+    lastIntegralDistance: d,
+    maxDistance: lastState.maxDistance,
   }
   return some(newState)
 }
 
 // only consider the most simple case
-const calcEnabledId = (state:CalcState, spot: SpotConfig): number[] => {
+const calcEnabledId = (state: CalcState, spot: SpotConfig): number[] => {
   const headDist = state.lastIntegralDistance
   const head = headDist % spot.circleLength
-  let extra:Option<number> = none
-  let tail:number
+  let extra: Option<number> = none
+  let tail: number
   if (head < spot.lineLength) {
     const extraVal = spot.lineLength - head
     extra = some(extraVal)
@@ -92,10 +97,15 @@ const calcEnabledId = (state:CalcState, spot: SpotConfig): number[] => {
   const spotDistance = spot.circleLength / spot.total
   const headSpotId = Math.floor(head / spotDistance)
   const tailSpotId = Math.floor(tail / spotDistance)
+  if (headDist > state.maxDistance) {
+    // ignore h
+    const t = range(tailSpotId, spot.total)
+    return t
+  }
   if (isSome(extra)) {
     const h = range(0, headSpotId)
     let t: number[]
-    if (headDist < spot.circleLength){
+    if (headDist < spot.circleLength) {
       t = []
     } else {
       t = range(tailSpotId, spot.total)
@@ -107,13 +117,13 @@ const calcEnabledId = (state:CalcState, spot: SpotConfig): number[] => {
 }
 
 export class Spot {
-  public id:number
+  public id: number
   public timestamp: DateTime
   public state: SpotState = SpotState.STOP
   public circle: Konva.Circle
   private tracks: [Track, CalcState][] = []
   // for refreshing
-  private cb: (spot: Spot) => void = (spot: Spot) => {}
+  private cb: (spot: Spot) => void = (spot: Spot) => { }
   private config: SpotConfig
   private timerId: Option<number> = none
 
@@ -121,7 +131,7 @@ export class Spot {
    * @param spot 
    * @param circle 
    */
-  constructor(id:number,spot: SpotConfig, circle: Konva.CircleConfig) {
+  constructor(id: number, spot: SpotConfig, circle: Konva.CircleConfig) {
     this.config = spot
     this.circle = new Konva.Circle(circle)
     this.timestamp = DateTime.now()
@@ -132,15 +142,23 @@ export class Spot {
     if (this.state !== SpotState.STOP) {
       return
     }
-    
+
     const t = DateTime.now()
     const calc: CalcState = {
       startTime: t,
       lastIntegralTime: t,
       lastIntegralDistance: 0,
       lastIntegralRelativeTime: 0,
+      maxDistance: 0,
     }
-    this.tracks = tracks.map((t) => [t, cloneDeep(calc)])
+    this.tracks = tracks.map((t) => {
+      const maxDistance = Object.keys(t.speeds).map((s) => parseInt(s)).reduce((prev, curr) => {
+        return (curr > prev) ? curr : prev
+      })
+      const c = cloneDeep(calc)
+      c.maxDistance = maxDistance
+      return [t, c]
+    })
   }
 
   getTracks() {
@@ -149,7 +167,7 @@ export class Spot {
 
   start() {
     this.state = SpotState.START
-    const timerId = setInterval(()=>{this.update()}, this.config.updateInterval.as("milliseconds"))
+    const timerId = setInterval(() => { this.update() }, this.config.updateInterval.as("milliseconds"))
     this.timerId = some(timerId)
   }
 
@@ -163,25 +181,31 @@ export class Spot {
     this.cb = cb
   }
 
-  update(){
+  update() {
     if (this.state !== SpotState.START) {
       return
     }
     let isChanged = false
-    for (const track of this.tracks){
+    const isAllStop: boolean[] = []
+    for (const track of this.tracks) {
       const [t, calc] = track
       const now = DateTime.now()
-      const newState = nextState(calc, now, t.speeds)
+      const newState = nextState(calc, now, t.speeds, this.config)
       if (isSome(newState)) {
         const enabledIds = calcEnabledId(newState.value, this.config)
         if (enabledIds.includes(this.id)) {
           isChanged = true
           this.circle.fill(t.color)
-        } 
+        }
         track[1] = newState.value
+        isAllStop.push(false)
+      } else {
+        isAllStop.push(true)
       }
     }
-
+    if (isAllStop.reduce((prev, curr) => prev && curr, true)) {
+      this.stop()
+    }
     if (!isChanged) {
       this.circle.fill("black")
     }

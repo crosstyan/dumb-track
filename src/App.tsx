@@ -78,8 +78,18 @@ function App() {
           300: 5,
           400: 6.5,
         }
+        const speeds3:SpeedMap = {
+          0: 4,
+          50: 5,
+          100: 7,
+          150: 7.5,
+          200: 8,
+          300: 9,
+          400: 5.5,
+        }
         const track = new Track(speeds, "blue")
         const track2 = new Track(speeds2, "red")
+        const track3 = new Track(speeds3, "green")
         const circles = range(circleNum).map((i) => {
           const p = getAbsolutePointAtLength(rect, i * l / circleNum)
           const circleConfig:CircleConfig = {x: p.x, y: p.y, radius: circleRadius, fill: 'black'}
@@ -91,7 +101,7 @@ function App() {
             updateInterval: Duration.fromMillis(100),
           }
           const spot = new Spot(i,spotConfig,circleConfig)
-          spot.setTracks([track, track2])
+          spot.setTracks([track, track2, track3])
           spot.setCallback(()=>{layer.draw()})
           return spot
         })
